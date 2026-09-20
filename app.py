@@ -3,6 +3,9 @@ import requests
 import math
 
 app = Flask(__name__)
+app.json.ensure_ascii = False  # emit real "é" etc. instead of "\u00e9" escapes
+# On Flask versions older than 2.3, use this instead:
+# app.config['JSON_AS_ASCII'] = False
 
 USER_AGENT = "bixi-shortcut/0.1 (pbizzarri2003@gmail.coms)"
 STATION_INFO_URL = "https://gbfs.velobixi.com/gbfs/2-2/en/station_information.json"
@@ -10,7 +13,43 @@ STATION_STATUS_URL = "https://gbfs.velobixi.com/gbfs/2-2/en/station_status.json"
 MONTREAL_VIEWBOX = "-73.75,45.70,-73.40,45.40"
 
 
+# ---------- Geocoding ----------
+
+import time
+import threading
+
+_geocode_cache = {}
+_geocode_cache_lock = threading.Lock()
+_last_nominatim_call = 0.0
+_nominatim_lock = threading.Lock()
+CACHE_TTL_SECONDS = 120          # how long a geocoded address stays cached
+MIN_SECONDS_BETWEEN_CALLS = 1.1  # a little over Nominatim's 1/sec limit, for safety
+
+
+def _nominatim_get(url, params, headers):
+    """Every outbound Nominatim request goes through here — this is what
+    guarantees we never send requests faster than the policy allows, even
+    across different addresses or during rapid testing."""
+    global _last_nominatim_call
+    with _nominatim_lock:
+        wait = MIN_SECONDS_BETWEEN_CALLS - (time.monotonic() - _last_nominatim_call)
+        if wait > 0:
+            time.sleep(wait)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        _last_nominatim_call = time.monotonic()
+    return response
+
+
 def geocode_address(address, limit=5):
+    # Serve from cache if we've resolved this exact address recently — this
+    # is what stops /geocode, /stations, and /maps-url from each separately
+    # re-hitting Nominatim for the same address within one navigation.
+    cache_key = address.strip().lower()
+    with _geocode_cache_lock:
+        cached = _geocode_cache.get(cache_key)
+        if cached and (time.monotonic() - cached["time"]) < CACHE_TTL_SECONDS:
+            return cached["candidates"]
+
     url = "https://nominatim.openstreetmap.org/search"
     headers = {"User-Agent": USER_AGENT}
 
@@ -27,7 +66,7 @@ def geocode_address(address, limit=5):
         "format": "json",
         "limit": limit,
     }
-    response = requests.get(url, params=params, headers=headers, timeout=10)
+    response = _nominatim_get(url, params, headers)
     response.raise_for_status()
     results = response.json()
 
@@ -43,7 +82,7 @@ def geocode_address(address, limit=5):
             "viewbox": MONTREAL_VIEWBOX,
             "bounded": 1,
         }
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response = _nominatim_get(url, params, headers)
         response.raise_for_status()
         results = response.json()
 
@@ -52,7 +91,7 @@ def geocode_address(address, limit=5):
     if not results:
         params.pop("bounded", None)
         params.pop("viewbox", None)
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response = _nominatim_get(url, params, headers)
         response.raise_for_status()
         results = response.json()
 
@@ -66,6 +105,10 @@ def geocode_address(address, limit=5):
             continue
         seen.add(key)
         candidates.append({"display_name": r["display_name"], "lat": lat, "lon": lon})
+
+    with _geocode_cache_lock:
+        _geocode_cache[cache_key] = {"candidates": candidates, "time": time.monotonic()}
+
     return candidates
 
 

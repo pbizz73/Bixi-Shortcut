@@ -1,6 +1,6 @@
 import requests
 
-BASE = "http://127.0.0.1:5000"
+BASE = "https://bixi-shortcut.onrender.com"
 address = "500 Rue Sainte-Catherine"
 
 r = requests.get(f"{BASE}/geocode", params={"address": address})
