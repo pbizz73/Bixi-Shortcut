@@ -1,6 +1,6 @@
 import requests
 
-BASE = "https://bixi-shortcut.onrender.com"
+BASE = "http://127.0.0.1:5000"
 address = "500 Rue Sainte-Catherine"
 
 r = requests.get(f"{BASE}/geocode", params={"address": address})
@@ -27,7 +27,7 @@ else:
     chosen_station = stations[0]
     print(f"\nUsing: {chosen_station}\n")
 
-    r = requests.get(f"{BASE}/maps-url", params={
+    r = requests.get(f"{BASE}/station-location", params={
         "address": address,
         "chosen_address": chosen_address,
         "chosen_station": chosen_station,

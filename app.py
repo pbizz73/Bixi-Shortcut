@@ -12,7 +12,6 @@ STATION_INFO_URL = "https://gbfs.velobixi.com/gbfs/2-2/en/station_information.js
 STATION_STATUS_URL = "https://gbfs.velobixi.com/gbfs/2-2/en/station_status.json"
 MONTREAL_VIEWBOX = "-73.75,45.70,-73.40,45.40"
 
-
 # ---------- Geocoding ----------
 
 import time
@@ -42,7 +41,7 @@ def _nominatim_get(url, params, headers):
 
 def geocode_address(address, limit=5):
     # Serve from cache if we've resolved this exact address recently — this
-    # is what stops /geocode, /stations, and /maps-url from each separately
+    # is what stops /geocode, /stations, and /station-location from each separately
     # re-hitting Nominatim for the same address within one navigation.
     cache_key = address.strip().lower()
     with _geocode_cache_lock:
@@ -128,6 +127,31 @@ def resolve_destination(address, chosen_address=None):
     return None  # the chosen text didn't match any current candidate
 
 
+def resolve_destination_from_request(args):
+    """Two supported ways to say where you're headed:
+    1. lat & lon directly — e.g. from Apple's native Location picker in the
+       Shortcut, which has already done the hard work of resolving a search
+       to an exact spot. No Nominatim call needed at all in this path.
+    2. address (and optional chosen_address) — resolved via Nominatim, exactly
+       as before. Kept fully working for any other client (a future web app,
+       a manual-entry fallback, etc.) that only has typed text to go on.
+    Returns (lat, lon) or None if neither resolves.
+    """
+    lat = args.get("lat")
+    lon = args.get("lon")
+    if lat and lon:
+        try:
+            return float(lat), float(lon)
+        except ValueError:
+            return None
+
+    address = args.get("address")
+    if not address:
+        return None
+    chosen_address = args.get("chosen_address")
+    return resolve_destination(address, chosen_address)
+
+
 # ---------- BIXI stations ----------
 
 def haversine_meters(lat1, lon1, lat2, lon2):
@@ -192,12 +216,7 @@ def geocode_endpoint():
 
 @app.route("/stations")
 def stations_endpoint():
-    address = request.args.get("address")
-    chosen_address = request.args.get("chosen_address")
-    if not address:
-        return jsonify({"error": "missing_address"}), 400
-
-    dest = resolve_destination(address, chosen_address)
+    dest = resolve_destination_from_request(request.args)
     if dest is None:
         return jsonify({"error": "address_match_failed"}), 409
     dest_lat, dest_lon = dest
@@ -209,15 +228,17 @@ def stations_endpoint():
     return jsonify({"stations": [station_label(s) for s in stations]})
 
 
-@app.route("/maps-url")
-def maps_url_endpoint():
-    address = request.args.get("address")
-    chosen_address = request.args.get("chosen_address")
+@app.route("/station-location")
+def station_location_endpoint():
+    """Returns just the chosen station's coordinates — nothing Maps-specific.
+    The Shortcut's own "Open Directions" action (Part 7) is what actually
+    launches Apple Maps in biking mode; there's no need to build a Maps URL
+    here at all, which sidesteps relying on any undocumented URL parameter."""
     chosen_station = request.args.get("chosen_station")
-    if not address or not chosen_station:
+    if not chosen_station:
         return jsonify({"error": "missing_params"}), 400
 
-    dest = resolve_destination(address, chosen_address)
+    dest = resolve_destination_from_request(request.args)
     if dest is None:
         return jsonify({"error": "address_match_failed"}), 409
     dest_lat, dest_lon = dest
@@ -227,12 +248,7 @@ def maps_url_endpoint():
     if match is None:
         return jsonify({"error": "station_match_failed"}), 409
 
-    url = (
-        "https://www.google.com/maps/dir/?api=1"
-        f"&destination={match['lat']},{match['lon']}"
-        "&travelmode=bicycling&dir_action=navigate"
-    )
-    return jsonify({"maps_url": url})
+    return jsonify({"lat": match["lat"], "lon": match["lon"]})
 
 
 if __name__ == "__main__":
